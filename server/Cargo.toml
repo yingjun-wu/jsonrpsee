@@ -24,7 +24,8 @@ tokio-stream = "0.1.7"
 http = "0.2.7"
 hyper = { version = "0.14", features = ["server", "http1", "http2"] }
 tower = "0.4.13"
-
+tokio-rustls = { version = "0.23.4", optional = true}
+rustls = { version = "0.20.8", optional = true}
 
 [dev-dependencies]
 anyhow = "1"
@@ -33,3 +34,9 @@ rand = "0.8"
 tracing-subscriber = { version = "0.3.3", features = ["env-filter"] }
 tower = { version = "0.4.13", features = ["timeout"] }
 socket2 = "0.4.7"
+
+[features]
+default = []
+# Internal feature to indicate whether TLS is enabled.
+# Does nothing on its own.
+tls = ["tokio-rustls", "rustls"]

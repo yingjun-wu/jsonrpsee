@@ -57,6 +57,11 @@ use tower::layer::util::Identity;
 use tower::{Layer, Service};
 use tracing::{instrument, Instrument};
 
+#[cfg(feature = "tls")]
+use rustls::{Certificate, PrivateKey};
+
+
+
 /// Default maximum connections allowed.
 const MAX_CONNECTIONS: u32 = 100;
 
@@ -130,6 +135,11 @@ where
 		let batch_requests_supported = self.cfg.batch_requests_supported;
 		let id_provider = self.id_provider;
 		let max_subscriptions_per_connection = self.cfg.max_subscriptions_per_connection;
+		#[cfg(feature = "tls")]
+		let acceptor = match self.cfg.tls_cfg {
+			Some(cfg) => tokio_rustls::TlsAcceptor::from(cfg),
+			None => panic!("Please initialize certificate/privatekey!")
+		};
 
 		let mut id: u32 = 0;
 		let connection_guard = ConnectionGuard::new(self.cfg.max_connections as usize);
@@ -157,8 +167,15 @@ where
 						max_connections: self.cfg.max_connections,
 						enable_http: self.cfg.enable_http,
 						enable_ws: self.cfg.enable_ws,
+						#[cfg(feature = "tls")]
+						acceptor: acceptor.clone(),
 					};
-					process_connection(&self.service_builder, &connection_guard, data, socket, &mut connections);
+					process_connection(
+						&self.service_builder, 
+						&connection_guard, 
+						data, 
+						socket, 
+						&mut connections);
 					id = id.wrapping_add(1);
 				}
 				Err(MonitoredError::Selector(err)) => {
@@ -199,6 +216,9 @@ struct Settings {
 	enable_http: bool,
 	/// Enable WS.
 	enable_ws: bool,
+
+	#[cfg(feature = "tls")]
+	tls_cfg: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 }
 
 impl Default for Settings {
@@ -215,6 +235,8 @@ impl Default for Settings {
 			ping_interval: Duration::from_secs(60),
 			enable_http: true,
 			enable_ws: true,
+			#[cfg(feature = "tls")]
+			tls_cfg: None,
 		}
 	}
 }
@@ -453,6 +475,19 @@ impl<B, L> Builder<B, L> {
 		self
 	}
 
+	///
+	#[cfg(feature = "tls")]
+	pub fn set_tls(mut self, certs: Vec<Certificate>, key: PrivateKey) -> Self {
+		let cfg = tokio_rustls::rustls::ServerConfig::builder()
+			.with_safe_defaults()
+			.with_no_client_auth()
+			.with_single_cert(certs, key)
+			.map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+			.unwrap();
+		self.settings.tls_cfg = Some(Arc::new(cfg));
+		self
+	}
+
 	/// Finalize the configuration of the server. Consumes the [`Builder`].
 	///
 	/// ```rust
@@ -507,6 +542,7 @@ impl<B, L> Builder<B, L> {
 	/// ```
 	pub fn build_from_tcp(self, listener: impl Into<StdTcpListener>) -> Result<Server<B, L>, Error> {
 		let listener = TcpListener::from_std(listener.into())?;
+
 
 		Ok(Server {
 			listener,
@@ -770,6 +806,9 @@ struct ProcessConnection<L> {
 	enable_http: bool,
 	/// Allow JSON-RPC WS request and WS upgrade requests.
 	enable_ws: bool,
+
+	#[cfg(feature = "tls")]
+	acceptor: tokio_rustls::TlsAcceptor,
 }
 
 #[instrument(name = "connection", skip_all, fields(remote_addr = %cfg.remote_addr, conn_id = %cfg.conn_id), level = "INFO")]
@@ -801,7 +840,10 @@ fn process_connection<'a, L: Logger, B, U>(
 		Some(conn) => conn,
 		None => {
 			tracing::warn!("Too many connections. Please try again later.");
-			connections.add(http::reject_connection(socket).in_current_span().boxed());
+			connections.add(http::reject_connection(
+				#[cfg(feature = "tls")]
+				cfg.acceptor,
+				socket).in_current_span().boxed());
 			return;
 		}
 	};
@@ -834,11 +876,19 @@ fn process_connection<'a, L: Logger, B, U>(
 
 	let service = service_builder.service(tower_service);
 
-	connections.add(Box::pin(try_accept_connection(socket, service, cfg.stop_handle).in_current_span()));
+	connections.add(Box::pin(try_accept_connection(
+		#[cfg(feature = "tls")]
+		cfg.acceptor,
+		socket, 
+		service, 
+		cfg.stop_handle).in_current_span()));
 }
 
 // Attempts to create a HTTP connection from a socket.
-async fn try_accept_connection<S, Bd>(socket: TcpStream, service: S, mut stop_handle: StopHandle)
+async fn try_accept_connection<S, Bd>(
+	#[cfg(feature = "tls")]
+	acceptor: tokio_rustls::TlsAcceptor,
+	socket: TcpStream, service: S, mut stop_handle: StopHandle)
 where
 	S: Service<hyper::Request<hyper::Body>, Response = hyper::Response<Bd>> + Send + 'static,
 	S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -847,6 +897,15 @@ where
 	<Bd as HttpBody>::Error: Send + Sync + StdError,
 	<Bd as HttpBody>::Data: Send,
 {
+	#[cfg(feature = "tls")]
+	let socket = match acceptor.accept(socket).await  {
+		Ok(socket) => socket,
+    	Err(e) => {
+			tracing::warn!("HTTPS accept failed, {}", e);
+			return
+		}
+	};
+
 	let conn = hyper::server::conn::Http::new().serve_connection(socket, service).with_upgrades();
 
 	tokio::pin!(conn);
