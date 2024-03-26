@@ -35,10 +35,22 @@ pub(crate) fn is_json(content_type: Option<&hyper::header::HeaderValue>) -> bool
 	})
 }
 
-pub(crate) async fn reject_connection(socket: tokio::net::TcpStream) {
+pub(crate) async fn reject_connection(
+	#[cfg(feature = "tls")] acceptor: tokio_rustls::TlsAcceptor,
+	socket: tokio::net::TcpStream,
+) {
 	async fn reject(_req: hyper::Request<hyper::Body>) -> Result<hyper::Response<hyper::Body>, Infallible> {
 		Ok(response::too_many_requests())
 	}
+
+	#[cfg(feature = "tls")]
+	let socket = match acceptor.accept(socket).await {
+		Ok(socket) => socket,
+		Err(e) => {
+			tracing::warn!("HTTPS accept failed, {}", e);
+			return;
+		}
+	};
 
 	if let Err(e) = hyper::server::conn::Http::new().serve_connection(socket, hyper::service::service_fn(reject)).await
 	{
