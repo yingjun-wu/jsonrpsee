@@ -57,9 +57,6 @@ use tower::layer::util::Identity;
 use tower::{Layer, Service};
 use tracing::{instrument, Instrument};
 
-#[cfg(feature = "tls")]
-use rustls::{Certificate, PrivateKey};
-
 /// Default maximum connections allowed.
 const MAX_CONNECTIONS: u32 = 100;
 
@@ -471,13 +468,7 @@ impl<B, L> Builder<B, L> {
 
 	///
 	#[cfg(feature = "tls")]
-	pub fn set_tls(mut self, certs: Vec<Certificate>, key: PrivateKey) -> Self {
-		let cfg = tokio_rustls::rustls::ServerConfig::builder()
-			.with_safe_defaults()
-			.with_no_client_auth()
-			.with_single_cert(certs, key)
-			.map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
-			.unwrap();
+	pub fn set_tls(mut self, cfg: tokio_rustls::rustls::ServerConfig) -> Self {
 		self.settings.tls_cfg = Some(Arc::new(cfg));
 		self
 	}
